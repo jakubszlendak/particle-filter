@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+import sys
+import os.path
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 """
 Based on Dakota's Nelson PF implementation for laser scanner
@@ -90,10 +94,10 @@ class ParticleFilter:
     def __init__(self):
         self.initialized = False  # make sure we don't perform updates before everything is setup
         rospy.init_node('pf')  # tell roscore that we are creating a new node named "pf"
-
-        self.base_frame = "base_link"  # the frame of the robot base
+        robot_name = rospy.get_namespace()[1:]
+        self.base_frame = robot_name + "base_link"  # the frame of the robot base
         self.map_frame = "map"  # the name of the map coordinate frame
-        self.odom_frame = "odom"  # the name of the odometry coordinate frame
+        self.odom_frame = robot_name + "odom"  # the name of the odometry coordinate frame
         self.beacons_topic = "beacon_localization/distances/probabilistic"  # the topic where we will get laser scans from TODO: filter parametrization
 
         self.n_particles = 500  # the number of particles to use
@@ -351,16 +355,23 @@ class ParticleFilter:
         """ This is the default logic for what to do when processing scan data.
             Feel free to modify this, however, I hope it will provide a good
             guide.  The input msg is an object of type sensor_msgs/LaserScan """
+
+        rospy.loginfo('Scan received')
         if not self.initialized:
             # wait for initialization to complete
+            rospy.loginfo('not initialized')
             return
 
         if not (self.tf_listener.canTransform(self.base_frame, msg.header.frame_id, msg.header.stamp)):
+
+            rospy.loginfo('cannot transform from scan to base frame')
+            print  self.base_frame, msg.header.frame_id
             # need to know how to transform the laser to the base frame
             # this will be given by either Gazebo or neato_node
             return
 
         if not (self.tf_listener.canTransform(self.base_frame, self.odom_frame, msg.header.stamp)):
+            rospy.loginfo('cannot transform from odom to base frame')
             # need to know how to transform between base and odometric frames
             # this will eventually be published by either Gazebo or neato_node
             return
