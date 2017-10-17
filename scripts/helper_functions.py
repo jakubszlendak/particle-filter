@@ -1,26 +1,14 @@
 """ Some convenience functions for translating between various representions of a robot pose.
     TODO: nothing... you should not have to modify these """
 
-import rospy
 
-from std_msgs.msg import Header, String
-from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, PoseArray, Pose, Point, Quaternion
-from nav_msgs.srv import GetMap
-from copy import deepcopy
-
-import tf
-from tf import TransformListener
-from tf import TransformBroadcaster
-from tf.transformations import euler_from_quaternion, rotation_matrix, quaternion_from_matrix
-from random import gauss
-
+from geometry_msgs.msg import Pose, Point, Quaternion
 import math
-import time
-
 import numpy as np
-from numpy.random import random_sample
-from sklearn.neighbors import NearestNeighbors
+
+
+def gaussian(mu, sigma, x):
+    return math.exp(- ((mu - x) ** 2) / (sigma ** 2) / 2.0) / math.sqrt(2.0 * math.pi * (sigma ** 2))
 
 
 def convert_translation_rotation_to_pose(translation, rotation):

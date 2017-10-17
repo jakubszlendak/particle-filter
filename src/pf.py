@@ -27,12 +27,13 @@ import time
 
 import numpy as np
 from numpy.random import random_sample, normal
-from occupancy_field import OccupancyField
 
-from helper_functions import (convert_pose_inverse_transform,
+import scipy
+
+from scripts.helper_functions import (convert_pose_inverse_transform,
                               convert_translation_rotation_to_pose,
                               convert_pose_to_xy_and_theta,
-                              angle_diff, sum_vectors)
+                              angle_diff, sum_vectors, gaussian)
 
 
 class Particle(object):
@@ -93,7 +94,7 @@ class ParticleFilter:
         self.base_frame = "base_link"  # the frame of the robot base
         self.map_frame = "map"  # the name of the map coordinate frame
         self.odom_frame = "odom"  # the name of the odometry coordinate frame
-        self.beacons_topic = "beacons"  # the topic where we will get laser scans from
+        self.beacons_topic = "beacon_localization/distances/probabilistic"  # the topic where we will get laser scans from TODO: filter parametrization
 
         self.n_particles = 500  # the number of particles to use
 
@@ -103,7 +104,6 @@ class ParticleFilter:
         self.laser_max_distance = 2.0  # maximum penalty to assess in the likelihood field model
 
         self.sigma = 0.08  # guess for how inaccurate lidar readings are in meters
-
         # Setup pubs and subs
 
         # pose_listener responds to selection of a new approximate robot location (for instance using rviz)
@@ -114,7 +114,7 @@ class ParticleFilter:
 
         # laser_subscriber listens for data from the lidar
         self.beacon_subscriber = rospy.Subscriber(self.beacons_topic, BeaconsScan, self.scan_received)
-
+        print self.beacon_subscriber.resolved_name
         # enable listening for and broadcasting coordinate transforms
         self.tf_listener = TransformListener()
         self.tf_broadcaster = TransformBroadcaster()
@@ -123,6 +123,8 @@ class ParticleFilter:
 
         self.current_odom_xy_theta = []
 
+        self.laser_pose = None
+
         # # request the map from the map server, the map should be of type nav_msgs/OccupancyGrid
         # self.map_server = rospy.ServiceProxy('static_map', GetMap)
         # self.map = self.map_server().map
@@ -130,8 +132,9 @@ class ParticleFilter:
         # self.occupancy_field = OccupancyField(self.map)
 
 
-
         self.initialized = True
+
+        rospy.loginfo('Initialized particle filter')
 
     def update_robot_pose(self):
         """ Update the estimate of the robot's pose given the updated particles.
@@ -211,33 +214,50 @@ class ParticleFilter:
         self.particle_cloud = new_particles
 
     def update_particles_with_beacons(self, msg):
-        throw Exception('Not implemented!!')
 
-    # def update_particles_with_laser(self, msg):
-    #     """ Updates the particle weights in response to the scan contained in the msg """
-    #     for particle in self.particle_cloud:
-    #         tot_prob = 0
-    #         for index, scan in enumerate(msg.ranges):
-    #             x, y = self.transform_scan(particle, scan, index)
-    #             # transform scan to view of the particle
-    #             d = self.occupancy_field.get_closest_obstacle_distance(x, y)
-    #             # calculate nearest distance to particle's scan (should be near 0 if it's on robot)
-    #             tot_prob += math.exp((-d ** 2) / (2 * self.sigma ** 2))
-    #             # add probability (0 to 1) to total probability
-    #
-    #         tot_prob = tot_prob / len(msg.ranges)
-    #         # normalize total probability back to 0-1
-    #         particle.w = tot_prob
-    #         # assign particles weight
-    #
-    # def transform_scan(self, particle, distance, theta):
-    #     """ Calculates the x and y of a scan from a given particle
-    #     particle: Particle object
-    #     distance: scan distance (from ranges)
-    #     theta: scan angle (range index)
-    #     """
-    #     return (particle.x + distance * math.cos(math.radians(particle.theta + theta)),
-    #             particle.y + distance * math.sin(math.radians(particle.theta + theta)))
+        for particle in self.particle_cloud:
+            total_probability = 1.0
+            for beacon in msg.beacons:
+                distance = math.sqrt(
+                    (beacon.pose.x - particle.x) ** 2 +
+                    (beacon.pose.y - particle.y) ** 2
+                )
+                total_probability *= gaussian(distance, self.sigma, beacon.distance)
+
+            print total_probability
+
+            total_probability /= len(msg.beacons)
+
+            particle.w = total_probability
+
+
+            # raise Exception('Not implemented!!')
+
+    def update_particles_with_laser(self, msg):
+        """ Updates the particle weights in response to the scan contained in the msg """
+        for particle in self.particle_cloud:
+            tot_prob = 0
+            for index, scan in enumerate(msg.ranges):
+                x, y = self.transform_scan(particle, scan, index)
+                # transform scan to view of the particle
+                d = self.occupancy_field.get_closest_obstacle_distance(x, y)
+                # calculate nearest distance to particle's scan (should be near 0 if it's on robot)
+                tot_prob += math.exp((-d ** 2) / (2 * self.sigma ** 2))
+                # add probability (0 to 1) to total probability
+
+            tot_prob = tot_prob / len(msg.ranges)
+            # normalize total probability back to 0-1
+            particle.w = tot_prob
+            # assign particles weight
+
+    def transform_scan(self, particle, distance, theta):
+        """ Calculates the x and y of a scan from a given particle
+        particle: Particle object
+        distance: scan distance (from ranges)
+        theta: scan angle (range index)
+        """
+        return (particle.x + distance * math.cos(math.radians(particle.theta + theta)),
+                particle.y + distance * math.sin(math.radians(particle.theta + theta)))
 
     @staticmethod
     def weighted_values(values, probabilities, size):
@@ -331,7 +351,7 @@ class ParticleFilter:
         """ This is the default logic for what to do when processing scan data.
             Feel free to modify this, however, I hope it will provide a good
             guide.  The input msg is an object of type sensor_msgs/LaserScan """
-        if not (self.initialized):
+        if not self.initialized:
             # wait for initialization to complete
             return
 
@@ -358,7 +378,7 @@ class ParticleFilter:
         # store the the odometry pose in a more convenient format (x,y,theta)
         new_odom_xy_theta = convert_pose_to_xy_and_theta(self.odom_pose.pose)
 
-        if not (self.particle_cloud):
+        if not self.particle_cloud:
             # now that we have all of the necessary transforms we can update the particle cloud
             self.initialize_particle_cloud()
             # cache the last odometric pose so we can only update our particle filter if we move more than self.d_thresh or self.a_thresh
@@ -370,7 +390,7 @@ class ParticleFilter:
                       math.fabs(new_odom_xy_theta[2] - self.current_odom_xy_theta[2]) > self.a_thresh):
             # we have moved far enough to do an update!
             self.update_particles_with_odom(msg)  # update based on odometry
-            self.update_particles_with_laser(msg)  # update based on laser scan
+            self.update_particles_with_beacons(msg)  # update based on laser scan
             self.update_robot_pose()  # update robot's pose
             self.resample_particles()  # resample particles to focus on areas of high density
             self.fix_map_to_odom_transform(msg)  # update map to odom transform now that we have new particles
