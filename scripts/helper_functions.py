@@ -5,7 +5,7 @@
 from geometry_msgs.msg import Pose, Point, Quaternion
 import math
 import numpy as np
-
+from tf.transformations import euler_from_quaternion, rotation_matrix, quaternion_from_matrix
 
 def gaussian(mu, sigma, x):
     return math.exp(- ((mu - x) ** 2) / (sigma ** 2) / 2.0) / math.sqrt(2.0 * math.pi * (sigma ** 2))
@@ -32,7 +32,7 @@ def convert_pose_inverse_transform(pose):
 
     translation = (transformed_translation[0], transformed_translation[1], transformed_translation[2])
     rotation = quaternion_from_matrix(rotation)
-    return (translation, rotation)
+    return translation, rotation
 
 
 def convert_pose_to_xy_and_theta(pose):

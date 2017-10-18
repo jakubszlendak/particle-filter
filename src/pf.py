@@ -113,7 +113,7 @@ class ParticleFilter:
         # pose_listener responds to selection of a new approximate robot location (for instance using rviz)
         self.pose_listener = rospy.Subscriber("initialpose", PoseWithCovarianceStamped, self.update_initial_pose)
         # publish the current particle cloud.  This enables viewing particles in rviz.
-        self.particle_pub = rospy.Publisher("particlecloud", PoseArray, queue_size=10)
+        self.particle_pub = rospy.Publisher("bl/particlecloud", PoseArray, queue_size=10)
         self.marker_pub = rospy.Publisher("markers", MarkerArray, queue_size=10)
 
         # laser_subscriber listens for data from the lidar
@@ -223,8 +223,8 @@ class ParticleFilter:
             total_probability = 1.0
             for beacon in msg.beacons:
                 distance = math.sqrt(
-                    (beacon.pose.x - particle.x) ** 2 +
-                    (beacon.pose.y - particle.y) ** 2
+                    (beacon.pose.position.x - particle.x) ** 2 +
+                    (beacon.pose.position.y - particle.y) ** 2
                 )
                 total_probability *= gaussian(distance, self.sigma, beacon.distance)
 
@@ -363,19 +363,26 @@ class ParticleFilter:
             return
 
         if not (self.tf_listener.canTransform(self.base_frame, msg.header.frame_id, msg.header.stamp)):
-
-            rospy.loginfo('cannot transform from scan to base frame')
-            print  self.base_frame, msg.header.frame_id
+        # if not (self.tf_listener.canTransform(self.base_frame, msg.header.frame_id, rospy.Time(0))):
+        #     rospy.loginfo('cannot transform from scan to base frame ' + str(msg.header.stamp) + ' ' + str(rospy.Time.now()) + ' ' + str(rospy.Time.now() - msg.header.stamp))
+        #     print  self.base_frame, msg.header.frame_id
             # need to know how to transform the laser to the base frame
             # this will be given by either Gazebo or neato_node
             return
 
         if not (self.tf_listener.canTransform(self.base_frame, self.odom_frame, msg.header.stamp)):
-            rospy.loginfo('cannot transform from odom to base frame')
-            # need to know how to transform between base and odometric frames
-            # this will eventually be published by either Gazebo or neato_node
-            return
+            print 'gonna wait...'
+            self.tf_listener.waitForTransform(self.base_frame, self.odom_frame, msg.header.stamp, rospy.Duration(1.0/5))
 
+        # if not (self.tf_listener.canTransform(self.base_frame, self.odom_frame, rospy.Time.now()-rospy.Duration(1))):
+        #     rospy.loginfo('cannot transform from odom to base frame')
+        #     print  self.base_frame, self.odom_frame
+        #     # need to know how to transform between base and odometric frames
+        #     # this will eventually be published by either Gazebo or neato_node
+        #     return
+
+
+        print 'passed!'
         # calculate pose of laser relative ot the robot base
         p = PoseStamped(header=Header(stamp=rospy.Time(0),
                                       frame_id=msg.header.frame_id))
@@ -385,6 +392,7 @@ class ParticleFilter:
         p = PoseStamped(header=Header(stamp=msg.header.stamp,
                                       frame_id=self.base_frame),
                         pose=Pose())
+        # self.tf_listener.waitForTransform()
         self.odom_pose = self.tf_listener.transformPose(self.odom_frame, p)
         # store the the odometry pose in a more convenient format (x,y,theta)
         new_odom_xy_theta = convert_pose_to_xy_and_theta(self.odom_pose.pose)
