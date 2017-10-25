@@ -13,7 +13,8 @@ import rospy
 
 from std_msgs.msg import Header, String, ColorRGBA
 from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, PoseArray, Pose, Point, Quaternion, Vector3
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, PoseArray, Pose, Point, Quaternion, Vector3, \
+    PoseWithCovariance
 from beacon_msgs.msg import BeaconPositionAndDistance, BeaconsScan
 from nav_msgs.srv import GetMap
 from visualization_msgs.msg import Marker, MarkerArray
@@ -107,18 +108,19 @@ class ParticleFilter:
 
         self.laser_max_distance = 2.0  # maximum penalty to assess in the likelihood field model
 
-        self.sigma = 0.08  # guess for how inaccurate lidar readings are in meters
+        self.sigma = 1  # guess for how inaccurate beacon scans are are in meters
         # Setup pubs and subs
 
         # pose_listener responds to selection of a new approximate robot location (for instance using rviz)
         self.pose_listener = rospy.Subscriber("initialpose", PoseWithCovarianceStamped, self.update_initial_pose)
         # publish the current particle cloud.  This enables viewing particles in rviz.
         self.particle_pub = rospy.Publisher("bl/particlecloud", PoseArray, queue_size=10)
+        self.pose_pub = rospy.Publisher('bl/pose', PoseWithCovarianceStamped, queue_size=10)
         self.marker_pub = rospy.Publisher("markers", MarkerArray, queue_size=10)
 
         # laser_subscriber listens for data from the lidar
         self.beacon_subscriber = rospy.Subscriber(self.beacons_topic, BeaconsScan, self.scan_received)
-        print self.beacon_subscriber.resolved_name
+
         # enable listening for and broadcasting coordinate transforms
         self.tf_listener = TransformListener()
         self.tf_broadcaster = TransformBroadcaster()
@@ -127,14 +129,9 @@ class ParticleFilter:
 
         self.current_odom_xy_theta = []
 
-        self.laser_pose = None
-
-        # # request the map from the map server, the map should be of type nav_msgs/OccupancyGrid
-        # self.map_server = rospy.ServiceProxy('static_map', GetMap)
-        # self.map = self.map_server().map
-        # # for now we have commented out the occupancy field initialization until you can successfully fetch the map
-        # self.occupancy_field = OccupancyField(self.map)
-
+        self.robot_pose = None
+        self.odom_pose = None
+        self.receiver_pose = None
 
         self.initialized = True
 
@@ -151,17 +148,45 @@ class ParticleFilter:
         y = 0
         theta = 0
         angles = []
+
+        x_var = 0
+        y_var = 0
+
         for particle in self.particle_cloud:
             x += particle.x * particle.w
             y += particle.y * particle.w
             v = [particle.w * math.cos(math.radians(particle.theta)),
                  particle.w * math.sin(math.radians(particle.theta))]
             angles.append(v)
+
         theta = sum_vectors(angles)
+
+        for particle in self.particle_cloud:
+            x_var += (particle.x - x)**2 * particle.w
+            y_var += (particle.y - y) ** 2 * particle.w
+
+
+        print 'Position x, y, xvar, yvar', x, y, x_var, y_var
+        covar = np.zeros((6, 6))
+        covar[0, 0] = x_var
+        covar[1, 1] = y_var
         orientation_tuple = tf.transformations.quaternion_from_euler(0, 0, theta)
-        self.robot_pose = Pose(position=Point(x=x, y=y),
-                               orientation=Quaternion(x=orientation_tuple[0], y=orientation_tuple[1],
-                                                      z=orientation_tuple[2], w=orientation_tuple[3]))
+        self.robot_pose = PoseWithCovarianceStamped(
+            header=Header(
+                stamp=rospy.Time.now(),
+                frame_id=self.map_frame
+            ),
+            pose=PoseWithCovariance(
+                pose=Pose(
+                    position=Point(x=x, y=y),
+                    orientation=Quaternion(
+                        x=orientation_tuple[0],
+                        y=orientation_tuple[1],
+                        z=orientation_tuple[2],
+                        w=orientation_tuple[3])),
+                covariance=covar.flatten()
+            )
+        )
 
     def update_particles_with_odom(self, msg):
         """ Update the particles using the newly given odometry pose.
@@ -228,40 +253,9 @@ class ParticleFilter:
                 )
                 total_probability *= gaussian(distance, self.sigma, beacon.distance)
 
-            print total_probability
-
             total_probability /= len(msg.beacons)
 
             particle.w = total_probability
-
-
-            # raise Exception('Not implemented!!')
-
-    def update_particles_with_laser(self, msg):
-        """ Updates the particle weights in response to the scan contained in the msg """
-        for particle in self.particle_cloud:
-            tot_prob = 0
-            for index, scan in enumerate(msg.ranges):
-                x, y = self.transform_scan(particle, scan, index)
-                # transform scan to view of the particle
-                d = self.occupancy_field.get_closest_obstacle_distance(x, y)
-                # calculate nearest distance to particle's scan (should be near 0 if it's on robot)
-                tot_prob += math.exp((-d ** 2) / (2 * self.sigma ** 2))
-                # add probability (0 to 1) to total probability
-
-            tot_prob = tot_prob / len(msg.ranges)
-            # normalize total probability back to 0-1
-            particle.w = tot_prob
-            # assign particles weight
-
-    def transform_scan(self, particle, distance, theta):
-        """ Calculates the x and y of a scan from a given particle
-        particle: Particle object
-        distance: scan distance (from ranges)
-        theta: scan angle (range index)
-        """
-        return (particle.x + distance * math.cos(math.radians(particle.theta + theta)),
-                particle.y + distance * math.sin(math.radians(particle.theta + theta)))
 
     @staticmethod
     def weighted_values(values, probabilities, size):
@@ -351,6 +345,8 @@ class ParticleFilter:
 
         self.marker_pub.publish(MarkerArray(markers=marker_array))
 
+        self.pose_pub.publish(self.robot_pose)
+
     def scan_received(self, msg):
         """ This is the default logic for what to do when processing scan data.
             Feel free to modify this, however, I hope it will provide a good
@@ -363,30 +359,15 @@ class ParticleFilter:
             return
 
         if not (self.tf_listener.canTransform(self.base_frame, msg.header.frame_id, msg.header.stamp)):
-        # if not (self.tf_listener.canTransform(self.base_frame, msg.header.frame_id, rospy.Time(0))):
-        #     rospy.loginfo('cannot transform from scan to base frame ' + str(msg.header.stamp) + ' ' + str(rospy.Time.now()) + ' ' + str(rospy.Time.now() - msg.header.stamp))
-        #     print  self.base_frame, msg.header.frame_id
-            # need to know how to transform the laser to the base frame
-            # this will be given by either Gazebo or neato_node
             return
 
         if not (self.tf_listener.canTransform(self.base_frame, self.odom_frame, msg.header.stamp)):
-            print 'gonna wait...'
             self.tf_listener.waitForTransform(self.base_frame, self.odom_frame, msg.header.stamp, rospy.Duration(1.0/5))
 
-        # if not (self.tf_listener.canTransform(self.base_frame, self.odom_frame, rospy.Time.now()-rospy.Duration(1))):
-        #     rospy.loginfo('cannot transform from odom to base frame')
-        #     print  self.base_frame, self.odom_frame
-        #     # need to know how to transform between base and odometric frames
-        #     # this will eventually be published by either Gazebo or neato_node
-        #     return
-
-
-        print 'passed!'
-        # calculate pose of laser relative ot the robot base
+        # calculate pose of BLE receiver relative ot the robot base
         p = PoseStamped(header=Header(stamp=rospy.Time(0),
                                       frame_id=msg.header.frame_id))
-        self.laser_pose = self.tf_listener.transformPose(self.base_frame, p)
+        self.receiver_pose = self.tf_listener.transformPose(self.base_frame, p)
 
         # find out where the robot thinks it is based on its odometry
         p = PoseStamped(header=Header(stamp=msg.header.stamp,
@@ -420,7 +401,7 @@ class ParticleFilter:
         """ This method constantly updates the offset of the map and
             odometry coordinate systems based on the latest results from
             the localizer """
-        (translation, rotation) = convert_pose_inverse_transform(self.robot_pose)
+        (translation, rotation) = convert_pose_inverse_transform(self.robot_pose.pose.pose)
         p = PoseStamped(pose=convert_translation_rotation_to_pose(translation, rotation),
                         header=Header(stamp=msg.header.stamp, frame_id=self.base_frame))
         self.odom_to_map = self.tf_listener.transformPose(self.odom_frame, p)
